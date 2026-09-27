@@ -54,7 +54,7 @@ MACD_SIGNAL = 9
 
 # Default mepet threshold (relative or absolute distance between MACD & Signal line)
 # When distance is smaller than this threshold, signal is HOLD (Rule 7)
-DEFAULT_MEPET_THRESHOLD = 0.00002
+DEFAULT_MEPET_THRESHOLD = 0.00018
 
 class MACDCalculator:
     """Real-time Exponential Moving Average (EMA) and MACD (4, 12, 9) Engine."""
@@ -115,7 +115,9 @@ class MACDCalculator:
         """Compute full MACD over an array of candles: [{'open', 'high', 'low', 'close', 'time'}]."""
         self.reset()
         result = {}
-        for c in candles:
+        # Ensure candles are sorted chronologically ascending (oldest first)
+        sorted_candles = sorted(candles, key=lambda x: float(x.get("time", x.get("t", 0))))
+        for c in sorted_candles:
             close_p = float(c.get("close", c.get("c", 0.0)))
             if close_p > 0:
                 result = self.update_with_price(close_p)
@@ -234,9 +236,12 @@ class QuotexBotBridge:
         signal_line = macd_data.get("signal_line", 0.0)
         hist = macd_data.get("hist", 0.0)
         distance = macd_data.get("distance", abs(macd_line - signal_line))
+        current_price = macd_data.get("price", 1.0)
+        scale_factor = (current_price / 1.0) if current_price > 10 else 1.0
+        effective_threshold = self.mepet_threshold * scale_factor
 
         # Check mepet condition
-        is_mepet = distance <= self.mepet_threshold
+        is_mepet = distance <= effective_threshold
 
         if self.martingale.is_stopped_due_to_k6_loss:
             signal = "STOPPED_K6"
@@ -246,7 +251,7 @@ class QuotexBotBridge:
             reason = "Bot status: PAUSED"
         elif is_mepet:
             signal = "HOLD"
-            reason = f"Garis MACD mepet (Jarak: {distance:.6f} <= Thresh: {self.mepet_threshold:.6f})"
+            reason = f"⏸️ Garis MACD mepet (Jarak: {distance:.6f} <= Thresh: {effective_threshold:.6f})"
         elif macd_line > signal_line:
             signal = "BUY"
             reason = f"MACD Hijau ({macd_line:.6f}) > Merah ({signal_line:.6f}) -> CALL/BUY"
@@ -351,23 +356,11 @@ class QuotexBotBridge:
                         await websocket.send(json.dumps(response))
 
                 elif msg_type == "TICK_UPDATE":
-                    # Single tick price update
+                    # Single tick price update for logging/monitoring
                     price = float(data.get("price", 0.0))
                     market = data.get("market", self.active_market)
                     self.active_market = market
-                    if price > 0:
-                        macd_res = self.macd.update_with_price(price)
-                        sig_eval = self.evaluate_signal(macd_res)
-                        
-                        response = {
-                            "type": "SIGNAL_UPDATE",
-                            "market": market,
-                            "price": price,
-                            "macd": macd_res,
-                            "evaluation": sig_eval,
-                            "timestamp": int(time.time() * 1000)
-                        }
-                        await websocket.send(json.dumps(response))
+                    # Tick received; 30s candle MACD calculation is performed on full candle arrays
 
                 elif msg_type == "TRADE_EXECUTED":
                     # Bot executed an order in browser

@@ -23,6 +23,13 @@ if [ $? -ne 0 ]; then
     python3 -m pip install websockets
 fi
 
+# Clean up existing instance on port 8765 if running
+if lsof -ti :8765 > /dev/null 2>&1; then
+    echo "[INFO] Menutup proses bridge server lama pada port 8765..."
+    kill -9 $(lsof -ti :8765) 2>/dev/null
+    sleep 0.5
+fi
+
 # Run bridge server
 echo "[INFO] Menjalankan bridge server di ws://localhost:8765..."
 python3 bridge_server.py

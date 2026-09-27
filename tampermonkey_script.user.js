@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Quotex MACD (4,12,9) Auto-Trader & Python Bridge Bot
 // @namespace    https://market-quotex.pro/
-// @version      2.8.0
-// @description  Full Synchronized Quotex MACD (4,12,9) Auto-Trader: True History Sync, Trades Panel PnL Scraper, Canvas/SVG MACD Sync, Base 15k, Martingale K1-K6.
+// @version      5.5.8
+// @description  Full Synchronized Quotex MACD (4,12,9) Auto-Trader: Dedicated Investment Input Targeter, Completed Trades Sidebar Watcher, Instant Martingale K1-K6.
 // @author       AI Antigravity
 // @match        https://market-quotex.pro/*
 // @match        https://*.market-quotex.pro/*
@@ -20,7 +20,7 @@
 (function () {
     'use strict';
 
-    console.log("%c[QUOTEX-BOT] Initializing MACD (4,12,9) Bot v2.8 with Precision Payout & Sub-chart Sync...", "color: #00ffcc; font-weight: bold; font-size: 14px;");
+    console.log("%c[QUOTEX-BOT] Initializing MACD (4,12,9) Bot v3.6 with Dedicated Investment Targeter & Instant K1-K6...", "color: #00ffcc; font-weight: bold; font-size: 14px;");
 
     const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
 
@@ -42,7 +42,8 @@
         martingaleSteps: [15000, 35000, 77000, 165000, 350000, 747000, 1611000],
         maxLevel: 6,            // Stop if K6 loss (Rule 6)
 
-        defaultMepetThreshold: 0.000008
+        // Toleransi Jarak Mepet (Hold filter saat kedua garis rapat/sejajar, ~0.3 pip)
+        defaultMepetThreshold: 0.000025
     };
 
     // Global State
@@ -79,11 +80,15 @@
         activeTrade: null,
         candleCountdown: 30,
 
+        // Visual Canvas Line Tips
+        visualGreenTip: null,
+        visualRedTip: null,
+
         soundEnabled: true
     };
 
     // ==========================================
-    // 2. CANVAS FILLTEXT & LIVE TICK INTERCEPTOR
+    // 2. LIVE PRICE INTERCEPTOR (Seamless Market Sync & OHLC Parser)
     // ==========================================
     let lastRecordedPrice = 0;
     let lastTickTime = 0;
@@ -93,12 +98,35 @@
         win.CanvasRenderingContext2D.prototype.fillText = function (text, x, y, ...args) {
             try {
                 if (typeof text === 'string') {
-                    const clean = text.trim();
+                    const clean = text.trim().replace(/,/g, '');
+
+                    // 1. Direct OHLC Close Parser (e.g. "Close: 104.9028")
+                    if (text.includes('Close:') || text.includes('Close :')) {
+                        const m = text.match(/Close\s*:\s*([\d.]+)/i);
+                        if (m) {
+                            const p = parseFloat(m[1]);
+                            if (p > 0.0001 && p < 1000000) {
+                                lastRecordedPrice = p;
+                                lastTickTime = Date.now();
+                                CandleStore.addLiveTick(p, lastTickTime);
+                            }
+                        }
+                    }
+
+                    // 2. Continuous Price Axis Numbers (Retina & Standard)
                     if (/^\d{1,6}\.\d{3,6}$/.test(clean)) {
                         const p = parseFloat(clean);
                         if (p > 0.0001 && p < 1000000) {
                             const now = Date.now();
-                            if (p !== lastRecordedPrice || (now - lastTickTime > 300)) {
+                            // If price jumped by > 10%, it's a new market!
+                            if (lastRecordedPrice === 0 || Math.abs(p - lastRecordedPrice) / lastRecordedPrice > 0.10) {
+                                lastRecordedPrice = p;
+                                CandleStore.candles = [];
+                                CandleStore.tickStream = [];
+                                CandleStore.currentCandle = null;
+                            }
+
+                            if (p !== lastRecordedPrice || (now - lastTickTime > 150)) {
                                 lastRecordedPrice = p;
                                 lastTickTime = now;
                                 CandleStore.addLiveTick(p, now);
@@ -108,6 +136,37 @@
                 }
             } catch (err) {}
             return origFillText.apply(this, [text, x, y, ...args]);
+        };
+
+        // 3. Direct Visual MACD Line Tip Tracker from Canvas Strokes
+        let lastLineToX = 0, lastLineToY = 0;
+        const origLineTo = win.CanvasRenderingContext2D.prototype.lineTo;
+        win.CanvasRenderingContext2D.prototype.lineTo = function (x, y) {
+            lastLineToX = x;
+            lastLineToY = y;
+            return origLineTo.apply(this, [x, y]);
+        };
+
+        const origStroke = win.CanvasRenderingContext2D.prototype.stroke;
+        win.CanvasRenderingContext2D.prototype.stroke = function (...args) {
+            try {
+                const style = String(this.strokeStyle || '').toLowerCase();
+                const now = Date.now();
+
+                // Any Green / Teal / Cyan MACD line stroke
+                if (style.includes('38, 166') || style.includes('26, 188') || style.includes('0, 255') || style.includes('0, 230') || style.includes('0, 200') || style.includes('0, 150') || style.includes('#00') || style.includes('#26') || style.includes('green') || style.includes('teal')) {
+                    if (lastLineToX > 0 && lastLineToY > 0) {
+                        STATE.visualGreenTip = { x: lastLineToX, y: lastLineToY, time: now };
+                    }
+                }
+                // Any Red / Orange / Pink Signal line stroke
+                else if (style.includes('239, 83') || style.includes('231, 76') || style.includes('255, 82') || style.includes('255, 0') || style.includes('244, 67') || style.includes('#ef') || style.includes('#ff') || style.includes('red') || style.includes('orange')) {
+                    if (lastLineToX > 0 && lastLineToY > 0) {
+                        STATE.visualRedTip = { x: lastLineToX, y: lastLineToY, time: now };
+                    }
+                }
+            } catch (e) {}
+            return origStroke.apply(this, args);
         };
     } catch (e) {
         console.warn("[QUOTEX-BOT] Canvas hook fallback:", e);
@@ -123,6 +182,7 @@
         maxCandles: 300,
 
         addLiveTick(price, timestamp = Date.now()) {
+            if (!price || isNaN(price) || price <= 0) return;
             STATE.currentPrice = price;
             this.tickStream.push({ time: timestamp, price: price });
             if (this.tickStream.length > 500) this.tickStream.shift();
@@ -159,7 +219,7 @@
             for (const c of candleArray) {
                 if (Array.isArray(c)) {
                     parsed.push({
-                        time: c[0],
+                        time: Number(c[0] || 0),
                         open: parseFloat(c[1]),
                         high: parseFloat(c[2]),
                         low: parseFloat(c[3]),
@@ -168,7 +228,7 @@
                     });
                 } else if (typeof c === 'object' && c !== null) {
                     parsed.push({
-                        time: c.time || c.t || 0,
+                        time: Number(c.time || c.t || c.timestamp || 0),
                         open: parseFloat(c.open || c.o || c.close || c.c || 0),
                         high: parseFloat(c.high || c.h || c.close || c.c || 0),
                         low: parseFloat(c.low || c.l || c.close || c.c || 0),
@@ -180,6 +240,8 @@
             
             const valid = parsed.filter(c => !isNaN(c.close) && c.close > 0);
             if (valid.length > 0) {
+                // Strict chronological sorting ascending: oldest first, newest last
+                valid.sort((a, b) => (Number(a.time) || 0) - (Number(b.time) || 0));
                 this.candles = valid.slice(-this.maxCandles);
                 Engine.evaluate();
             }
@@ -191,52 +253,86 @@
         slowAlpha: 2 / (CONFIG.macdSlow + 1),     // 0.1538
         signalAlpha: 2 / (CONFIG.macdSignal + 1), // 0.2
 
+        getAdaptiveMepetThreshold(marketName, price) {
+            const m = (marketName || '').toUpperCase();
+            const p = price > 0 ? price : 1.0;
+
+            // 1. JPY Pairs (USD/JPY, EUR/JPY, GBP/JPY, AUD/JPY) -> Pip scale 0.01
+            if (m.includes('JPY') || (p >= 50 && p < 300 && !m.includes('INR') && !m.includes('BRL'))) {
+                return 0.0025;
+            }
+
+            // 2. High-value Crypto & Gold (BTC, ETH, XAU/USD, Gold)
+            if (m.includes('BTC') || m.includes('ETH') || m.includes('XAU') || m.includes('GOLD') || p >= 500) {
+                return p * 0.000030;
+            }
+
+            // 3. Exotic Currencies (USD/INR, USD/BRL, USD/PKR, USD/EGP, USD/IDR)
+            if (m.includes('INR') || m.includes('BRL') || m.includes('PKR') || m.includes('EGP') || m.includes('IDR')) {
+                return 0.0020;
+            }
+
+            // 4. Standard Forex 4-5 Decimals (EUR/USD, GBP/AUD, AUD/CHF, GBP/USD, EUR/GBP)
+            return 0.000025;
+        },
+
         evaluate() {
-            // Source 1: Check React Fiber candles
+            // Priority 1: Fetch real candles from React Fiber whenever needed
             const rCandles = QuotexScraper.findCandlesFromReact();
-            if (rCandles && rCandles.length > 10 && CandleStore.candles.length < rCandles.length) {
-                CandleStore.seedHistory(rCandles);
+            if (rCandles && rCandles.length >= 5) {
+                if (CandleStore.candles.length < rCandles.length || CandleStore.candles.length <= 2) {
+                    CandleStore.seedHistory(rCandles);
+                }
             }
 
-            // Source 2: Check Quotex SVG/Canvas MACD sub-chart
-            const visualMACD = QuotexScraper.readVisualMACD();
-            if (visualMACD) {
-                STATE.macdLine = visualMACD.macd;
-                STATE.signalLine = visualMACD.signal;
-                STATE.hist = visualMACD.hist;
-                STATE.distance = Math.abs(visualMACD.macd - visualMACD.signal);
-                this.applySignal(visualMACD.macd, visualMACD.signal, visualMACD.isMepet);
-                UI.updateHUD();
-                return;
-            }
-
-            // Source 3: Mathematical MACD on candle store
+            // Canonical 30s Candle MACD (4, 12, 9) Calculation
             const candles = [...CandleStore.candles];
             if (CandleStore.currentCandle) candles.push(CandleStore.currentCandle);
+            candles.sort((a, b) => (Number(a.time) || 0) - (Number(b.time) || 0));
 
-            if (candles.length >= 2) {
-                let fEMA = null;
-                let sEMA = null;
-                let sigEMA = null;
-                let mLine = 0;
+            const curP = STATE.currentPrice;
+            // Filter out old candles from other currency pairs (e.g. 0.85 EURGBP vs 104.9 USDINR)
+            let validCandles = candles.filter(c => !isNaN(c.close) && c.close > 0 && (curP <= 0 || Math.abs(c.close - curP) / curP < 0.25));
+            let closes = validCandles.map(c => c.close);
 
-                for (let i = 0; i < candles.length; i++) {
-                    const close = candles[i].close;
-                    if (fEMA === null) fEMA = close;
-                    else fEMA = (close * this.fastAlpha) + (fEMA * (1 - this.fastAlpha));
-
-                    if (sEMA === null) sEMA = close;
-                    else sEMA = (close * this.slowAlpha) + (sEMA * (1 - this.slowAlpha));
-
-                    mLine = fEMA - sEMA;
-
-                    if (sigEMA === null) sigEMA = mLine;
-                    else sigEMA = (mLine * this.signalAlpha) + (sigEMA * (1 - this.signalAlpha));
+            // If not enough 30s candles, sample from tickStream into 30s intervals
+            if (closes.length < 2 && CandleStore.tickStream.length >= 2) {
+                const intervalMs = CONFIG.timeframeSec * 1000;
+                const bucketMap = new Map();
+                for (const t of CandleStore.tickStream) {
+                    if (curP <= 0 || Math.abs(t.price - curP) / curP < 0.25) {
+                        const b = Math.floor(t.time / intervalMs) * intervalMs;
+                        bucketMap.set(b, t.price);
+                    }
                 }
+                const sortedBuckets = Array.from(bucketMap.keys()).sort((a, b) => a - b);
+                closes = sortedBuckets.map(b => bucketMap.get(b));
+            }
+
+            if (closes.length >= 2) {
+                let fastEMA = closes[0];
+                let slowEMA = closes[0];
+                const macdSeries = [];
+
+                for (let i = 0; i < closes.length; i++) {
+                    const p = closes[i];
+                    fastEMA = (p * this.fastAlpha) + (fastEMA * (1.0 - this.fastAlpha));
+                    slowEMA = (p * this.slowAlpha) + (slowEMA * (1.0 - this.slowAlpha));
+                    macdSeries.push(fastEMA - slowEMA);
+                }
+
+                let signalEMA = macdSeries[0];
+                for (let i = 0; i < macdSeries.length; i++) {
+                    const m = macdSeries[i];
+                    signalEMA = (m * this.signalAlpha) + (signalEMA * (1.0 - this.signalAlpha));
+                }
+
+                let mLine = macdSeries[macdSeries.length - 1];
+                let sigEMA = signalEMA;
 
                 const hist = mLine - sigEMA;
                 const distance = Math.abs(mLine - sigEMA);
-                const effectiveThreshold = STATE.mepetThreshold * (STATE.currentPrice > 10 ? STATE.currentPrice / 1000.0 : 1.0);
+                const effectiveThreshold = this.getAdaptiveMepetThreshold(STATE.activeMarket, curP);
                 const isMepet = distance <= effectiveThreshold;
 
                 STATE.macdLine = mLine;
@@ -244,45 +340,52 @@
                 STATE.hist = hist;
                 STATE.distance = distance;
                 STATE.isMepet = isMepet;
+                STATE.mepetThreshold = effectiveThreshold;
 
-                this.applySignal(mLine, sigEMA, isMepet);
-            } else if (CandleStore.tickStream.length >= 2) {
-                const ticks = CandleStore.tickStream;
-                let fEMA = ticks[0].price;
-                let sEMA = ticks[0].price;
-                let sigEMA = 0;
-                let mLine = 0;
-
-                for (let i = 0; i < ticks.length; i++) {
-                    const p = ticks[i].price;
-                    fEMA = (p * this.fastAlpha) + (fEMA * (1 - this.fastAlpha));
-                    sEMA = (p * this.slowAlpha) + (sEMA * (1 - this.slowAlpha));
-                    mLine = fEMA - sEMA;
-                    sigEMA = (mLine * this.signalAlpha) + (sigEMA * (1 - this.signalAlpha));
-                }
-
-                STATE.macdLine = mLine;
-                STATE.signalLine = sigEMA;
-                STATE.hist = mLine - sigEMA;
-                STATE.distance = Math.abs(mLine - sigEMA);
-                STATE.isMepet = STATE.distance <= STATE.mepetThreshold;
-
-                this.applySignal(mLine, sigEMA, STATE.isMepet);
+                this.applySignal(mLine, sigEMA, isMepet, effectiveThreshold);
             }
 
             UI.updateHUD();
         },
 
-        applySignal(macd, signal, isMepet) {
+        applySignal(macd, signal, isMepet, effectiveThreshold = STATE.mepetThreshold) {
             if (STATE.isStoppedK6) {
                 STATE.currentSignal = "STOPPED_K6";
                 STATE.signalReason = "STOP: Batas K6 Loss Tercapai!";
-            } else if (!STATE.isBotActive) {
+                return;
+            }
+            if (!STATE.isBotActive) {
                 STATE.currentSignal = "HOLD";
                 STATE.signalReason = "Standby (Klik Start Bot)";
-            } else if (isMepet) {
+                return;
+            }
+
+            // Priority 1: Direct Visual Line Tip comparison from Canvas Strokes
+            const now = Date.now();
+            if (STATE.visualGreenTip && STATE.visualRedTip && (now - STATE.visualGreenTip.time < 2500) && (now - STATE.visualRedTip.time < 2500)) {
+                // In canvas screen coordinates: smaller Y = higher position on screen
+                const pixelDiff = STATE.visualRedTip.y - STATE.visualGreenTip.y; // Positive if Green is higher than Red
+                const isVisuallyMepet = Math.abs(pixelDiff) < 1.5;
+
+                if (isVisuallyMepet) {
+                    STATE.currentSignal = "HOLD";
+                    STATE.signalReason = `⏸️ Garis Mepet (Visual Gap: ${Math.abs(pixelDiff).toFixed(1)}px)`;
+                    return;
+                } else if (pixelDiff > 0) {
+                    STATE.currentSignal = "BUY";
+                    STATE.signalReason = `🟢 Ujung Hijau > Merah -> CALL/BUY (+${pixelDiff.toFixed(1)}px)`;
+                    return;
+                } else {
+                    STATE.currentSignal = "SELL";
+                    STATE.signalReason = `🔴 Ujung Hijau < Merah -> PUT/SELL (${pixelDiff.toFixed(1)}px)`;
+                    return;
+                }
+            }
+
+            // Priority 2: Mathematical EMA MACD Engine
+            if (isMepet) {
                 STATE.currentSignal = "HOLD";
-                STATE.signalReason = `Garis Mepet (Jarak: ${STATE.distance.toFixed(6)})`;
+                STATE.signalReason = `⏸️ Garis Mepet (Jarak: ${STATE.distance.toFixed(6)} <= ${effectiveThreshold.toFixed(6)})`;
             } else if (macd > signal) {
                 STATE.currentSignal = "BUY";
                 STATE.signalReason = `🟢 Hijau > Merah -> CALL/BUY`;
@@ -302,30 +405,40 @@
     const QuotexScraper = {
         findCandlesFromReact() {
             try {
-                const root = document.querySelector('#root') || document.querySelector('.chart-wrapper') || document.body;
-                if (!root) return null;
-                const fiberKey = Object.keys(root).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactContainer$'));
-                if (!fiberKey) return null;
+                const searchRoots = [
+                    document.querySelector('.chart-wrapper canvas'),
+                    document.querySelector('canvas'),
+                    document.querySelector('.chart-wrapper'),
+                    document.querySelector('.page-trade'),
+                    document.querySelector('#root'),
+                    document.body
+                ].filter(Boolean);
 
-                const queue = [root[fiberKey]];
-                let visited = 0;
-                while (queue.length > 0 && visited < 300) {
-                    const node = queue.shift();
-                    visited++;
-                    if (!node) continue;
+                for (const root of searchRoots) {
+                    const fiberKey = Object.keys(root).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactContainer$') || k.startsWith('__reactInternalInstance$'));
+                    if (!fiberKey) continue;
 
-                    const candidates = [node.memoizedProps, node.memoizedState, node.stateNode];
-                    for (const obj of candidates) {
-                        if (obj && typeof obj === 'object') {
-                            if (Array.isArray(obj.candles) && obj.candles.length > 10) return obj.candles;
-                            if (Array.isArray(obj.history) && obj.history.length > 10) return obj.history;
-                            if (Array.isArray(obj.quotes) && obj.quotes.length > 10) return obj.quotes;
-                            if (Array.isArray(obj.bars) && obj.bars.length > 10) return obj.bars;
+                    const queue = [root[fiberKey]];
+                    let visited = 0;
+                    while (queue.length > 0 && visited < 2500) {
+                        const node = queue.shift();
+                        visited++;
+                        if (!node) continue;
+
+                        const candidates = [node.memoizedProps, node.memoizedState, node.stateNode];
+                        for (const obj of candidates) {
+                            if (obj && typeof obj === 'object') {
+                                if (Array.isArray(obj.candles) && obj.candles.length >= 5) return obj.candles;
+                                if (Array.isArray(obj.history) && obj.history.length >= 5) return obj.history;
+                                if (Array.isArray(obj.quotes) && obj.quotes.length >= 5) return obj.quotes;
+                                if (Array.isArray(obj.bars) && obj.bars.length >= 5) return obj.bars;
+                                if (Array.isArray(obj.data) && obj.data.length >= 5 && (obj.data[0]?.close || Array.isArray(obj.data[0]))) return obj.data;
+                            }
                         }
-                    }
 
-                    if (node.child) queue.push(node.child);
-                    if (node.sibling) queue.push(node.sibling);
+                        if (node.child) queue.push(node.child);
+                        if (node.sibling) queue.push(node.sibling);
+                    }
                 }
             } catch (e) {}
             return null;
@@ -461,10 +574,17 @@
                             if (body && typeof body === 'object') {
                                 const price = parseFloat(body.price || body.c || body.close || body.rate || (Array.isArray(body) ? body[1] : 0));
                                 const sym = body.symbol || body.asset || body.pair || body.s;
-                                if (sym) STATE.activeMarket = sym.replace(/_/g, '/').toUpperCase();
-                                if (price > 0) {
-                                    CandleStore.addLiveTick(price);
-                                    Bridge.send({ type: "TICK_UPDATE", market: STATE.activeMarket, price: price, time: Date.now() });
+                                
+                                if (sym && price > 0) {
+                                    const symFormatted = sym.replace(/_/g, '/').toUpperCase();
+                                    const curBase = (STATE.activeMarket || '').replace(/\s*\(OTC\)/i, '').replace(/_/g, '/').trim().toUpperCase();
+                                    const incBase = symFormatted.replace(/\s*\(OTC\)/i, '').trim().toUpperCase();
+
+                                    // ONLY ingest ticks that match the active market!
+                                    if (incBase === curBase || symFormatted === STATE.activeMarket) {
+                                        CandleStore.addLiveTick(price);
+                                        Bridge.send({ type: "TICK_UPDATE", market: STATE.activeMarket, price: price, time: Date.now() });
+                                    }
                                 }
                             }
                         } else if (ev === 'history' || ev === 'candles' || ev === 'history/candles' || ev === 'chart/history') {
@@ -520,17 +640,6 @@
                                 STATE.currentStake = CONFIG.martingaleSteps[STATE.currentLevel] || CONFIG.martingaleSteps[0];
                             }
                             if (data.is_stopped_k6 !== undefined) STATE.isStoppedK6 = data.is_stopped_k6;
-                            UI.updateHUD();
-                        } else if (data.type === "SIGNAL_UPDATE") {
-                            if (data.evaluation) {
-                                STATE.macdLine = data.evaluation.macd_line;
-                                STATE.signalLine = data.evaluation.signal_line;
-                                STATE.hist = data.evaluation.hist;
-                                STATE.distance = data.evaluation.distance;
-                                STATE.isMepet = data.evaluation.is_mepet;
-                                if (data.evaluation.signal) STATE.currentSignal = data.evaluation.signal;
-                                if (data.evaluation.reason) STATE.signalReason = data.evaluation.reason;
-                            }
                             UI.updateHUD();
                         } else if (data.type === "MARTINGALE_UPDATE") {
                             if (data.data) {
@@ -617,16 +726,48 @@
         },
 
         getAmountInput() {
-            const selectors = ['input[name="amount"]', '.section-deal__investment input', '.input-control__input', '.deal-form input[type="text"]', '.deal-form input[type="number"]'];
-            for (const s of selectors) {
+            // Check specific investment inputs first
+            const specificSelectors = [
+                'input[name="amount"]',
+                '.section-deal__investment input',
+                '[data-test="investment-input"]',
+                '.investment-input input'
+            ];
+            for (const s of specificSelectors) {
                 const el = document.querySelector(s);
                 if (el && el.offsetParent !== null) return el;
             }
+
+            // Search inputs inside .section-deal / .deal-form that are NOT time inputs
+            const dealInputs = document.querySelectorAll('.section-deal input, .deal-form input, [class*="deal-form"] input');
+            for (const inp of dealInputs) {
+                if (inp && inp.offsetParent !== null) {
+                    const val = (inp.value || '').trim();
+                    // Time inputs contain ":" (e.g. 00:00:30) or name="time" -> skip!
+                    if (val.includes(':') || inp.name === 'time') continue;
+
+                    // Investment input has currency, numbers, or parent label Investment
+                    const parentTxt = (inp.closest('.input-control, [class*="form-row"], div')?.innerText || '').toLowerCase();
+                    if (parentTxt.includes('invest') || parentTxt.includes('amount') || parentTxt.includes('jumlah') || /[\d,.]+/.test(val)) {
+                        return inp;
+                    }
+                }
+            }
+
+            // Fallback: Return the second input in deal form if 2 inputs exist (1st is Time, 2nd is Investment)
+            if (dealInputs.length >= 2) return dealInputs[1];
+            if (dealInputs.length === 1) return dealInputs[0];
+
             return null;
         },
 
         readBalance() {
-            const selectors = ['.header-balance', '.balance-info', '.usermenu__info-balance', '.balance-block__value', '[data-test="balance"]', '.usermenu__balance-value'];
+            const selectors = [
+                '.header-balance', '.balance-info', '.usermenu__info-balance',
+                '.balance-block__value', '[data-test="balance"]', '.usermenu__balance-value',
+                '[class*="usermenu"] [class*="balance"]', '[class*="header"] [class*="balance"]',
+                '.usermenu', '[class*="usermenu"]'
+            ];
             for (const s of selectors) {
                 const el = document.querySelector(s);
                 if (el && el.innerText) {
@@ -635,123 +776,282 @@
                     if (!isNaN(val) && val > 0) return val;
                 }
             }
+            // Fallback: search any element in top header with currency symbol
+            const headerEls = document.querySelectorAll('header *[class*="balance"], header *[class*="user"], [class*="header"] div');
+            for (const el of headerEls) {
+                const txt = el.innerText || '';
+                if ((txt.includes('Rp') || txt.includes('$') || txt.includes('€')) && (txt.includes('DEMO') || txt.includes('LIVE') || /[\d,.]+/.test(txt))) {
+                    const clean = txt.replace(/[^0-9.]/g, '');
+                    const val = parseFloat(clean);
+                    if (!isNaN(val) && val > 100) return val;
+                }
+            }
             return STATE.currentBalance;
         },
 
-        readMarketAndPayout() {
-            let foundMarket = false;
-            let foundPayout = false;
+        readLiveChartPrice() {
+            // Priority 1: Check Close: text on chart
+            const allTxt = document.body.innerText || '';
+            const closeMatch = allTxt.match(/Close\s*:\s*([\d.]+)/i);
+            if (closeMatch) {
+                const p = parseFloat(closeMatch[1]);
+                if (p > 0.0001 && p < 1000000) return p;
+            }
 
-            // 1. Target exact active tab element at top bar
-            const activeTabSelectors = [
+            // Priority 2: Check chart price elements
+            const els = document.querySelectorAll('.chart-wrapper div, [class*="chart"] div, [class*="price"], [class*="badge"], [class*="value"]');
+            for (const el of els) {
+                if (el && el.offsetParent !== null && !el.closest('#quotex-mini-hud') && !el.closest('.section-deal')) {
+                    const txt = (el.innerText || '').trim().replace(/,/g, '');
+                    if (/^\d{1,6}\.\d{2,6}$/.test(txt)) {
+                        const p = parseFloat(txt);
+                        if (p > 0.0001 && p < 1000000) return p;
+                    }
+                }
+            }
+            return 0;
+        },
+
+        readMarketAndPayout() {
+            let foundMarket = null;
+            let foundPayout = null;
+
+            // Priority 1: Check the active tab at top left (above chart)
+            const topTabSelectors = [
+                '.header-sub__item',
+                '.header-sub__tabs',
+                '[class*="asset-select"]',
+                '.asset-select',
+                '[class*="tabs-list"] > *',
                 '.tab-item.active',
                 '.tab-item--active',
-                '.tab-item.tab-item--current',
-                '.tab-item.selected',
-                '.tab-item._active',
-                '.tabs__item.active',
-                '.tabs__item--active',
-                '.tabs-item.active',
-                '[class*="tab-item"][class*="active"]',
-                '[class*="tabs__item"][class*="active"]',
-                '[class*="tab--active"]',
-                '.tab-active',
-                '.header-sub__item.active',
-                '.header-sub__tabs .tab-item',
-                '.tabs-list .tab-item',
-                '[class*="tabs-list"] > div',
-                '.asset-select__button',
-                '.tab-item'
+                '.tab-item',
+                '.header-sub'
             ];
 
-            for (const sel of activeTabSelectors) {
+            for (const sel of topTabSelectors) {
                 const el = document.querySelector(sel);
-                if (el && el.innerText && el.offsetParent !== null) {
-                    const text = el.innerText.trim();
-                    const pairMatch = text.match(/([A-Z]{3}\/[A-Z]{3}(\s*\(OTC\))?|[A-Z]{3}_[A-Z]{3}(\s*\(OTC\))?)/i);
-                    const pctMatch = text.match(/(\d{1,3})%/);
-
-                    if (pairMatch && !foundMarket) {
-                        STATE.activeMarket = pairMatch[0].replace(/_/g, '/').toUpperCase();
-                        foundMarket = true;
+                if (el && el.offsetParent !== null && !el.closest('#quotex-mini-hud')) {
+                    const txt = el.innerText || '';
+                    const m = txt.match(/([A-Z]{3}[\/_][A-Z]{3}(?:\s*\(OTC\))?)/i);
+                    if (m && !txt.includes('DEMO ACCOUNT') && !txt.includes('LIVE ACCOUNT')) {
+                        foundMarket = m[1].replace(/_/g, '/').toUpperCase();
+                        const pMatch = txt.match(/(\d{1,3})%/);
+                        if (pMatch && parseInt(pMatch[1]) >= 10 && parseInt(pMatch[1]) <= 100) {
+                            foundPayout = `${pMatch[1]}%`;
+                        }
+                        if (foundMarket && foundPayout) break;
                     }
-                    if (pctMatch && !foundPayout) {
-                        STATE.activePayout = `${pctMatch[1]}%`;
-                        foundPayout = true;
-                    }
-                    if (foundMarket && foundPayout) break;
                 }
             }
 
-            // 2. If payout not found in active tab, check right deal panel (section-deal)
+            // Priority 2: Check the active deal panel header at top right (above Investment)
+            if (!foundMarket || !foundPayout) {
+                const dealHeaderSelectors = [
+                    '.section-deal__header',
+                    '.section-deal__asset-name',
+                    '.section-deal__asset',
+                    '[class*="deal-form__header"]',
+                    '[class*="section-deal"] [class*="asset"]'
+                ];
+                for (const sel of dealHeaderSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el && el.offsetParent !== null && !el.closest('#quotex-mini-hud')) {
+                        const txt = el.innerText || '';
+                        if (!foundMarket) {
+                            const m = txt.match(/([A-Z]{3}[\/_][A-Z]{3}(?:\s*\(OTC\))?)/i);
+                            if (m) foundMarket = m[1].replace(/_/g, '/').toUpperCase();
+                        }
+                        if (!foundPayout) {
+                            const pMatch = txt.match(/(\d{1,3})%/);
+                            if (pMatch && parseInt(pMatch[1]) >= 10 && parseInt(pMatch[1]) <= 100) {
+                                foundPayout = `${pMatch[1]}%`;
+                            }
+                        }
+                        if (foundMarket && foundPayout) break;
+                    }
+                }
+            }
+
+            // Priority 3: Search relative to PAIR INFORMATION button
+            if (!foundMarket) {
+                const pairInfoBtn = Array.from(document.querySelectorAll('button, a, div')).find(e => (e.innerText || '').includes('PAIR INFORMATION'));
+                if (pairInfoBtn && pairInfoBtn.parentElement) {
+                    const parent = pairInfoBtn.parentElement.parentElement || pairInfoBtn.parentElement;
+                    const txt = parent.innerText || '';
+                    const m = txt.match(/([A-Z]{3}[\/_][A-Z]{3}(?:\s*\(OTC\))?)/i);
+                    if (m) {
+                        foundMarket = m[1].replace(/_/g, '/').toUpperCase();
+                        const pMatch = txt.match(/(\d{1,3})%/);
+                        if (pMatch) foundPayout = `${pMatch[1]}%`;
+                    }
+                }
+            }
+
+            // Priority 4: Fallback for payout from deal form
             if (!foundPayout) {
-                const dealForm = document.querySelector('.section-deal, [class*="deal-form"], [class*="section-deal"]');
-                if (dealForm && dealForm.innerText) {
-                    const pctMatch = dealForm.innerText.match(/(?:\+|payout|keuntungan|profit|pembayaran)?\s*(\d{1,3})%/i);
-                    if (pctMatch) {
-                        STATE.activePayout = `${pctMatch[1]}%`;
-                        foundPayout = true;
+                const dealEl = document.querySelector('.section-deal, [class*="deal-form"], [class*="section-deal__payout"]');
+                if (dealEl && dealEl.innerText) {
+                    const pctMatch = dealEl.innerText.match(/(\d{1,3})%/);
+                    if (pctMatch && parseInt(pctMatch[1]) >= 10 && parseInt(pctMatch[1]) <= 100) {
+                        foundPayout = `${pctMatch[1]}%`;
                     }
                 }
             }
 
-            // 3. Fallback for market from document.title
-            if (!foundMarket && document.title) {
-                const m = document.title.match(/([A-Z]{3}\/[A-Z]{3}(\s*\(OTC\))?)/i);
-                if (m) STATE.activeMarket = m[1].toUpperCase();
+            // Update STATE and handle market switch
+            if (foundMarket) {
+                if (STATE.activeMarket !== foundMarket) {
+                    console.log(`%c[QUOTEX-BOT] Active market changed: ${STATE.activeMarket} -> ${foundMarket}`, "color: #ff9900; font-weight: bold;");
+                    STATE.activeMarket = foundMarket;
+                    STATE.currentPrice = 0;
+                    lastRecordedPrice = 0;
+                    CandleStore.candles = [];
+                    CandleStore.tickStream = [];
+                    CandleStore.currentCandle = null;
+                }
+            }
+
+            if (foundPayout) {
+                STATE.activePayout = foundPayout;
             }
         },
 
-        // Auto-sync Trades History from right sidebar on load
-        syncInitialTradesHistory() {
-            if (hasSyncedHistoryOnLoad) return;
+        lastTopTradeEl: null,
+        lastCompletedCount: -1,
+
+        // Real-time Trade Result Watcher from right sidebar (Instant Martingale Progression)
+        syncLiveTradesHistory() {
             try {
-                const tradeCards = document.querySelectorAll('.trades-item, [class*="trade-item"], .history-item, [class*="history__item"]');
-                if (tradeCards.length > 0) {
+                // 1. Direct class selectors
+                let tradeCards = Array.from(document.querySelectorAll(
+                    '.trades-item, [class*="trade-item"], [class*="trades-list"] > div, .history-item, [class*="history__item"], [class*="deals-list"] > div, .deal-item, [class*="sidebar"] [class*="item"], [class*="tab-trades"] > div, [class*="trades"] > div'
+                ));
+
+                // 2. Fallback: Search all containers on right side that have currency pair and amount
+                if (!tradeCards || tradeCards.length === 0) {
+                    const allDivs = document.querySelectorAll('[class*="trades"], [class*="deals"], [class*="sidebar"] div, [class*="history"] div');
+                    const found = [];
+                    for (const d of allDivs) {
+                        const txt = (d.innerText || '').trim();
+                        // Look for cards containing e.g. "GBP/AUD", "15,000 Rp" or "00:00:30"
+                        if ((txt.includes('OTC') || /[A-Z]{3}[\/_][A-Z]{3}/.test(txt)) && (txt.includes('Rp') || txt.includes('$') || txt.includes('00:00:30'))) {
+                            // Ensure it's a leaf/card container (not the entire list wrapper)
+                            if (d.children.length <= 6 && d.innerText.length < 120) {
+                                found.push(d);
+                            }
+                        }
+                    }
+                    tradeCards = found;
+                }
+
+                if (!tradeCards || tradeCards.length === 0) return;
+
+                const completedCards = [];
+                for (const card of tradeCards) {
+                    const txt = (card.innerText || '').trim();
+                    if (!txt) continue;
+                    // Skip active/running trade with countdown (e.g. 00:06, 00:25) or "Sell now"
+                    if (txt.includes('Sell now') || /\b00:0[1-9]\b|\b00:[12][0-9]\b/.test(txt)) {
+                        continue;
+                    }
+                    // Valid completed trade card (has 00:00:30 or completed amount)
+                    if (txt.includes('00:00:30') || txt.includes('0 Rp') || txt.includes('+') || (txt.includes('Rp') && !txt.includes('Sell now'))) {
+                        completedCards.push({ el: card, txt: txt });
+                    }
+                }
+
+                if (completedCards.length === 0) return;
+
+                // Initial Page Load History Sync
+                if (!hasSyncedHistoryOnLoad) {
                     let totalLosses = 0;
                     let totalWins = 0;
                     let pnl = 0;
                     let consecutiveLosses = 0;
                     let foundWin = false;
 
-                    for (const card of tradeCards) {
-                        const txt = card.innerText || '';
-                        if (txt.includes('0 Rp') && !txt.includes('+') && !txt.includes('Sell now')) {
+                    for (const item of completedCards) {
+                        const txt = item.txt;
+                        if ((txt.includes('0 Rp') || txt.includes('0.00') || txt.includes('0 $')) && !txt.includes('+') && !txt.includes('Sell now')) {
                             totalLosses++;
                             pnl -= 15000;
                             if (!foundWin) consecutiveLosses++;
-                        } else if (txt.includes('+') && txt.includes('Rp') && !txt.includes('Sell now')) {
+                        } else if (txt.includes('+') && !txt.includes('Sell now')) {
                             totalWins++;
-                            const match = txt.match(/\+([\d,.]+)\s*Rp/);
+                            const match = txt.match(/\+([\d,.]+)/);
                             const amt = match ? parseFloat(match[1].replace(/,/g, '')) : 14000;
                             pnl += amt;
                             foundWin = true;
                         }
                     }
 
-                    if (totalLosses > 0 || totalWins > 0) {
-                        STATE.wins = totalWins;
-                        STATE.losses = totalLosses;
-                        STATE.totalTrades = totalWins + totalLosses;
-                        STATE.totalPnL = pnl;
-                        STATE.currentLevel = Math.min(consecutiveLosses, CONFIG.maxLevel);
-                        STATE.currentStake = CONFIG.martingaleSteps[STATE.currentLevel];
-                        hasSyncedHistoryOnLoad = true;
-                        this.syncInputField();
-                        UI.updateHUD();
+                    STATE.wins = totalWins;
+                    STATE.losses = totalLosses;
+                    STATE.totalTrades = totalWins + totalLosses;
+                    STATE.totalPnL = pnl;
+                    STATE.currentLevel = Math.min(consecutiveLosses, CONFIG.maxLevel);
+                    STATE.currentStake = CONFIG.martingaleSteps[STATE.currentLevel];
+                    hasSyncedHistoryOnLoad = true;
+                    this.lastTopTradeEl = completedCards[0].el;
+                    this.lastCompletedCount = completedCards.length;
+                    this.syncInputField();
+                    UI.updateHUD();
+                    return;
+                }
+
+                // Dynamic new trade detection
+                const currentTop = completedCards[0];
+                const currentCount = completedCards.length;
+
+                // Trigger if top card element changed OR total completed count increased
+                if (currentTop.el !== this.lastTopTradeEl || currentCount > this.lastCompletedCount) {
+                    this.lastTopTradeEl = currentTop.el;
+                    this.lastCompletedCount = currentCount;
+
+                    const txt = currentTop.txt;
+                    console.log("%c[QUOTEX-BOT] New Completed Trade Result:", "color: #00ffcc; font-weight: bold;", txt);
+
+                    if (txt.includes('+')) {
+                        // WIN -> Reset to Base
+                        const match = txt.match(/\+([\d,.]+)/);
+                        const amt = match ? parseFloat(match[1].replace(/,/g, '')) : 14000;
+                        Martingale.recordWin(amt);
+                    } else if (txt.includes('0 Rp') || txt.includes('0.00') || txt.includes('0 $') || !txt.includes('+')) {
+                        // LOSS -> Step up Martingale
+                        Martingale.recordLoss(STATE.currentStake || 15000);
                     }
                 }
-            } catch (e) {}
+            } catch (e) {
+                console.error("[QUOTEX-BOT] Trade sync error:", e);
+            }
         },
 
         setInputValue(inputEl, value) {
             if (!inputEl) return;
             try {
                 inputEl.focus();
-                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                nativeSetter.call(inputEl, value);
+                const strVal = String(value);
+
+                // Set value property descriptor
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+                if (nativeSetter) {
+                    nativeSetter.call(inputEl, strVal);
+                } else {
+                    inputEl.value = strVal;
+                }
+
+                // Reset React value tracker to force state re-render
+                const tracker = inputEl._valueTracker;
+                if (tracker) {
+                    tracker.setValue(strVal + "_prev");
+                }
+
                 inputEl.dispatchEvent(new Event('input', { bubbles: true }));
                 inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+                inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                inputEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                inputEl.blur();
             } catch (e) {
                 inputEl.value = value;
             }
@@ -774,18 +1074,20 @@
             const input = this.getAmountInput();
 
             if (!btn) return false;
-            if (input) this.setInputValue(input, stake);
+            const targetStake = Martingale.getCurrentStake() || stake || 15000;
+            if (input) this.setInputValue(input, targetStake);
 
             const preOrderBalance = this.readBalance();
 
             setTimeout(() => {
                 try {
+                    if (input) this.setInputValue(input, targetStake);
                     btn.click();
                     Sound.play('entry');
 
                     STATE.activeTrade = {
                         direction: direction,
-                        stake: stake,
+                        stake: targetStake,
                         level: STATE.currentLevel,
                         preOrderBalance: preOrderBalance,
                         timestamp: Date.now()
@@ -794,7 +1096,7 @@
                     Bridge.send({
                         type: "TRADE_EXECUTED",
                         direction: direction,
-                        stake: stake,
+                        stake: targetStake,
                         level: STATE.currentLevel,
                         market: STATE.activeMarket,
                         candle_time: new Date().toLocaleTimeString()
@@ -886,7 +1188,13 @@
 
             // Detect Market & Payout
             QuotexDOM.readMarketAndPayout();
-            QuotexDOM.syncInitialTradesHistory();
+            QuotexDOM.syncLiveTradesHistory();
+
+            // Continuous Live Price Ingest
+            const domPrice = QuotexDOM.readLiveChartPrice();
+            if (domPrice > 0) {
+                CandleStore.addLiveTick(domPrice, now);
+            }
 
             // Balance & Trade resolution
             const domBal = QuotexDOM.readBalance();

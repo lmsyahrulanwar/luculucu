@@ -13,7 +13,7 @@
     },
     "mepet_filter": {
       "enabled": true,
-      "threshold": 0.000020
+      "threshold": 0.00018
     }
   },
   "timeframe": {
