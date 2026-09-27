@@ -1,0 +1,35 @@
+{
+  "platform": {
+    "name": "Quotex",
+    "url": "https://market-quotex.pro/en/demo-trade",
+    "account_type": "demo"
+  },
+  "strategy": {
+    "indicator": "MACD",
+    "macd_params": {
+      "fast_period": 4,
+      "slow_period": 12,
+      "signal_period": 9
+    },
+    "mepet_filter": {
+      "enabled": true,
+      "threshold": 0.000020
+    }
+  },
+  "timeframe": {
+    "candle_tf_seconds": 30,
+    "trade_duration_seconds": 30,
+    "entry_lead_ms": 1000
+  },
+  "money_management": {
+    "base_stake": 15000,
+    "martingale_steps": [15000, 35000, 77000, 165000, 350000, 747000, 1611000],
+    "max_martingale_level": 6,
+    "stop_on_k6_loss": true,
+    "currency": "IDR"
+  },
+  "bridge_server": {
+    "host": "0.0.0.0",
+    "port": 8765
+  }
+}
